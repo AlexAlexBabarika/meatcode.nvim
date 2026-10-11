@@ -93,6 +93,7 @@ vim.api.nvim_create_autocmd("User", {
     pcall(function() require("meatcode.ui.problems").refresh() end)
     pcall(function() require("meatcode.ui.list").refresh() end)
     pcall(function() require("meatcode.ui.problem").refresh_chains() end)
+    pcall(function() require("meatcode.ui.chains").refresh() end)
   end,
 })
 

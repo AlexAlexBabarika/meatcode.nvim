@@ -110,6 +110,32 @@ end
 local function attach_problem_metadata(problem, meta)
   problem.topics = union(problem.topics, meta.topics)
   problem.companies = union(problem.companies, meta.companies)
+  local record = type(problem.providers) == "table" and type(meta.provider) == "string"
+    and problem.providers[meta.provider] or nil
+  if type(record) == "table" and meta.paid_only ~= nil then
+    record.paid = meta.paid_only == true
+  end
+end
+
+local function sync_catalog_providers(problem)
+  if type(problem) ~= "table" or type(problem.providers) ~= "table" then return end
+  local cat = problem_catalog.get() or problem_catalog.load()
+  if not cat or type(cat.by_provider) ~= "table" then return end
+  for _, name in ipairs(providers.NAMES) do
+    local id = providers.id(problem, name)
+    local full = id and cat.by_provider[name] and cat.by_provider[name][tostring(id)] or nil
+    if full and type(full.providers) == "table" then
+      for pname, record in pairs(full.providers) do
+        if type(record) == "table" then
+          problem.providers[pname] = vim.tbl_extend("keep", problem.providers[pname] or {}, record)
+          if record.paid ~= nil then
+            problem.providers[pname].paid = record.paid
+          end
+        end
+      end
+      break
+    end
+  end
 end
 
 local function fetch_provider_meta(problem, provider_name, lang, cb, status)
@@ -124,19 +150,23 @@ local function fetch_provider_meta(problem, provider_name, lang, cb, status)
     local path = meta_cache_path(provider_name, id)
     local cached = util.read_json(path)
     local backend = providers.get(provider_name)
+    local locked_wall = cached and cached.paid_only == true
+      and not providers.paid_unlocked(provider_name)
     local has_lang = cached and type(cached.starterCode) == "table"
-      and type(cached.starterCode[lang]) == "string"
+      and type(cached.starterCode[lang]) == "string" and cached.starterCode[lang] ~= ""
     local has_sources = provider_name == "neetcode"
       or provider_name == "leetcode"
         and type(cached and cached.editorial_solutions) == "table"
         and cached.editorial_solutions[lang] ~= nil
-        and type(cached.community_solutions) == "table"
+        and type(cached and cached.community_solutions) == "table"
         and cached.community_solutions[lang] ~= nil
       or provider_name == "lintcode"
         and type(cached and cached.community_solutions) == "table"
         and cached.community_solutions[lang] ~= nil
-    if cached and cached.schema == util.META_SCHEMA and has_lang and has_sources then
-      if status then status("Using cached " .. backend.label .. " metadata and oracle candidates.") end
+    if cached and cached.schema == util.META_SCHEMA and (locked_wall or (has_lang and has_sources)) then
+      if status and not locked_wall then
+        status("Using cached " .. backend.label .. " metadata and oracle candidates.")
+      end
       attach_problem_metadata(problem, cached)
       return cb(nil, cached)
     end
@@ -283,25 +313,99 @@ end
 --- The submit provider's test run, as the runner's cloud oracle, or nil when
 --- that judge cannot take this problem. The judge's own metadata (argument
 --- labels, internal ids, starter shapes) comes from the provider cache.
-local function cloud_oracle(s)
-  local name = s.submit_provider
-  local backend = providers.get(name)
-  if not backend or not backend.test then return nil end
-  if not providers.available(s.problem, name)
-    and not (name == "lintcode" and providers.available(s.problem, "leetcode")) then
-    return nil
+local function known_inaccessible(s, name)
+  if s.rejected_submit and s.rejected_submit[name] then return true end
+  if providers.locked(s.problem, name) then return true end
+  if name == s.content_provider and s.meta then
+    return not providers.can_open(name, s.meta, s.lang)
   end
+  local id = providers.id(s.problem, name)
+  if not id then return false end
+  local cached = util.read_json(meta_cache_path(name, id))
+  if type(cached) == "table" and cached.schema == util.META_SCHEMA then
+    attach_problem_metadata(s.problem, cached)
+    local locked_wall = cached.paid_only == true and not providers.paid_unlocked(name)
+    local has_lang = type(cached.starterCode) == "table"
+      and type(cached.starterCode[s.lang]) == "string" and cached.starterCode[s.lang] ~= ""
+    if locked_wall then return true end
+    if type(cached.availableLanguages) == "table" and #cached.availableLanguages > 0
+      and not vim.tbl_contains(cached.availableLanguages, s.lang) then
+      return true
+    end
+    if has_lang and s.meta and s.meta.test_case_type ~= "class"
+      and cached.test_case_type == "class" then
+      return true
+    end
+  end
+  return false
+end
+
+local function submit_candidates(s)
+  local raw, seen = {}, {}
+  for _, name in ipairs(providers.candidates(s.problem, "submit")) do
+    if not known_inaccessible(s, name) then
+      seen[name] = true
+      table.insert(raw, name)
+    end
+  end
+  if s.content_provider and not seen[s.content_provider]
+    and not known_inaccessible(s, s.content_provider) then
+    table.insert(raw, s.content_provider)
+  end
+  local logged_in = {}
+  for _, name in ipairs(raw) do
+    local backend = providers.get(name)
+    if backend and backend.auth and backend.auth.is_logged_in() then
+      table.insert(logged_in, name)
+    end
+  end
+  return #logged_in > 0 and logged_in or raw
+end
+
+local function cloud_oracle(s)
+  local candidates = {}
+  for _, name in ipairs(submit_candidates(s)) do
+    local backend = providers.get(name)
+    if backend and backend.test
+      and (providers.available(s.problem, name)
+        or (name == "lintcode" and providers.available(s.problem, "leetcode"))) then
+      table.insert(candidates, name)
+    end
+  end
+  if #candidates == 0 then return nil end
   return {
-    provider = name,
+    provider = candidates[1],
     test = function(code, cases, cb)
-      local cancelled, stop = false, nil
-      fetch_provider_meta(s.problem, name, s.lang, function(err, meta)
+      local cancelled, stop, idx = false, nil, 0
+      local first_err
+      local function try_next()
         if cancelled then return end
-        if err or not meta then
-          return cb(err or ("no " .. backend.label .. " metadata for this problem"), nil)
+        idx = idx + 1
+        local name = candidates[idx]
+        if not name then
+          return cb(first_err or "no cloud judge available for this problem", nil)
         end
-        stop = backend.test(s.problem, meta, code, s.lang, cases, cb)
-      end)
+        local backend = providers.get(name)
+        fetch_provider_meta(s.problem, name, s.lang, function(err, meta)
+          if cancelled then return end
+          if err or not meta or not providers.can_open(name, meta, s.lang) then
+            s.rejected_submit = s.rejected_submit or {}
+            s.rejected_submit[name] = true
+            if not first_err then
+              first_err = err or (providers.locked(s.problem, name)
+                and ((s.problem.name or "this problem") .. " is paid-only on " .. backend.label))
+                or ("no " .. backend.label .. " metadata for this problem")
+            end
+            return try_next()
+          end
+          if s.submit_provider ~= name then
+            s.submit_provider = name
+            pcall(function() require("meatcode.ui.chains").refresh() end)
+          end
+          stop = backend.test(s.problem, meta, code, s.lang, cases, cb)
+        end)
+      end
+      try_next()
       return function()
         cancelled = true
         if stop then stop() end
@@ -313,8 +417,9 @@ end
 --- The oracle description the panels show, naming the judge the cloud oracle
 --- would use.
 local function describe_oracle(s)
+  local oracle = cloud_oracle(s)
   return runner.describe(providers.filename(s.problem), s.meta, s.lang,
-    cloud_oracle(s) and s.submit_provider or nil)
+    oracle and oracle.provider or nil)
 end
 
 local function render_ready(s)
@@ -654,11 +759,76 @@ end
 
 --- Re-resolve the judge and ready panel without overwriting live results.
 --- Content changes reopen through refresh_content, preserving the solution file.
+local function resolve_submit_provider(s)
+  s.rejected_submit = {}
+  local candidates = submit_candidates(s)
+  local first = candidates[1] or s.content_provider
+  if s.submit_provider ~= first then
+    s.submit_provider = first
+    if s.panel == "ready" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+      pcall(render_ready, s)
+    end
+    pcall(function() require("meatcode.ui.chains").refresh() end)
+  end
+
+  s.submit_generation = (s.submit_generation or 0) + 1
+  local generation = s.submit_generation
+  local index = 0
+
+  local function step()
+    if s.submit_generation ~= generation or not session_alive(s) then return end
+    index = index + 1
+    local name = candidates[index]
+    if not name then return end
+    if name == s.content_provider and providers.can_open(name, s.meta, s.lang) then
+      if s.submit_provider ~= name then
+        s.submit_provider = name
+        if s.panel == "ready" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+          pcall(render_ready, s)
+        end
+        pcall(function() require("meatcode.ui.chains").refresh() end)
+      end
+      return
+    end
+    fetch_provider_meta(s.problem, name, s.lang, function(err, meta)
+      vim.schedule(function()
+        if s.submit_generation ~= generation or not session_alive(s) then return end
+        if s.desc_buf and vim.api.nvim_buf_is_valid(s.desc_buf) then
+          pcall(render_description, s)
+        end
+        if not err and providers.can_open(name, meta, s.lang)
+          and not (s.meta.test_case_type ~= "class" and meta.test_case_type == "class") then
+          if s.submit_provider ~= name then
+            s.submit_provider = name
+            if s.panel == "ready" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+              pcall(render_ready, s)
+            end
+            pcall(function() require("meatcode.ui.chains").refresh() end)
+          end
+          return
+        end
+        s.rejected_submit[name] = true
+        local next_candidates = submit_candidates(s)
+        local fallback = next_candidates[1] or s.content_provider
+        if s.submit_provider ~= fallback then
+          s.submit_provider = fallback
+          if s.panel == "ready" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+            pcall(render_ready, s)
+          end
+          pcall(function() require("meatcode.ui.chains").refresh() end)
+        end
+        step()
+      end)
+    end)
+  end
+
+  step()
+end
+
 function M.refresh_chains()
   for _, s in pairs(sessions) do
     if session_alive(s) then
-      local chain = providers.candidates(s.problem, "submit")
-      s.submit_provider = chain[1] or s.content_provider
+      resolve_submit_provider(s)
       if s.panel == "ready" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
         pcall(render_ready, s)
       end
@@ -762,48 +932,70 @@ function M.submit()
   if not s then return end
   if s.busy_kind == "submit" then return util.notify("already running") end
   cancel_local_run(s)
-  if not providers.available(s.problem, s.submit_provider)
-    and not (s.submit_provider == "lintcode" and providers.available(s.problem, "leetcode")) then
-    return util.err("this problem is unavailable on " .. providers.get(s.submit_provider).label)
+  local candidates = submit_candidates(s)
+  if #candidates == 0 then
+    local fallback = providers.order("submit")[1] or s.submit_provider or s.content_provider
+    return util.err("this problem is unavailable on " .. providers.get(fallback).label)
   end
   save(s)
 
-  local backend = providers.get(s.submit_provider)
+  local backend = providers.get(candidates[1])
+  s.submit_provider = backend.name
   s.busy = true
   s.busy_kind = "submit"
   s.panel = "submit"
   results.running(s.res_buf, "Submitting to " .. backend.label)
 
-  providers.submit(s.problem, s.meta, current_code(s), s.lang, s.content_provider, s.submit_provider, function(err, data)
-    vim.schedule(function()
-      s.busy = false
-      s.busy_kind = nil
-      if err then
-        if s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
-          return results.render_submit_error(s.res_buf, backend.name, err)
+  providers.submit(s.problem, s.meta, current_code(s), s.lang, s.content_provider, candidates,
+    function(err, data, used_provider)
+      vim.schedule(function()
+        s.busy = false
+        s.busy_kind = nil
+        if used_provider and providers.get(used_provider) then
+          backend = providers.get(used_provider)
+          s.submit_provider = used_provider
         end
-        return util.err(backend.label .. " submission failed: " .. err)
-      end
-      local submission = backend.normalize_submission(data)
-      submission.provider = backend.name
-      s.failed_input = type(submission.failed_input) == "string"
-        and vim.trim(submission.failed_input) ~= "" and submission.failed_input or nil
-      if s.failed_input and runner.learn(
-        providers.filename(s.problem), s.failed_input, submission.expected, backend.name) then
-        -- The judge disclosed this answer. Future local runs can grade the same
-        -- input without asking the judge again.
-        submission.learned = true
-      end
-      if submission.learned and not submission.accepted
-        and runner.oracle(s.meta, s.lang) ~= "cloud" then
-        recheck_oracle(s, submission)
-      end
-      if submission.accepted then accepted(s) end
-      if not (s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf)) then return end
-      s.panel = submission
-      results.render_submit(s.res_buf, submission)
+        if s.desc_buf and vim.api.nvim_buf_is_valid(s.desc_buf) then
+          pcall(render_description, s)
+        end
+        pcall(function() require("meatcode.ui.chains").refresh() end)
+        if err then
+          if s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+            return results.render_submit_error(s.res_buf, backend.name, err)
+          end
+          return util.err(backend.label .. " submission failed: " .. err)
+        end
+        local submission = backend.normalize_submission(data)
+        submission.provider = backend.name
+        s.failed_input = type(submission.failed_input) == "string"
+          and vim.trim(submission.failed_input) ~= "" and submission.failed_input or nil
+        if s.failed_input and runner.learn(
+          providers.filename(s.problem), s.failed_input, submission.expected, backend.name) then
+          -- The judge disclosed this answer. Future local runs can grade the same
+          -- input without asking the judge again.
+          submission.learned = true
+        end
+        if submission.learned and not submission.accepted
+          and runner.oracle(s.meta, s.lang) ~= "cloud" then
+          recheck_oracle(s, submission)
+        end
+        if submission.accepted then accepted(s) end
+        if not (s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf)) then return end
+        s.panel = submission
+        results.render_submit(s.res_buf, submission)
+      end)
+    end,
+    function(selected_name)
+      vim.schedule(function()
+        local selected_backend = providers.get(selected_name)
+        if not selected_backend then return end
+        backend = selected_backend
+        s.submit_provider = selected_name
+        if s.busy_kind == "submit" and s.res_buf and vim.api.nvim_buf_is_valid(s.res_buf) then
+          results.running(s.res_buf, "Submitting to " .. selected_backend.label)
+        end
+      end)
     end)
-  end)
 end
 
 
@@ -1723,11 +1915,13 @@ function M.open(problem, opts)
         end
 
         local selected = vim.deepcopy(problem)
-        local submit_chain = providers.candidates(selected, "submit")
+        sync_catalog_providers(selected)
+        attach_problem_metadata(selected, meta)
         local s = {
           problem = selected,
           content_provider = provider,
-          submit_provider = submit_chain[1] or provider,
+          submit_provider = provider,
+          rejected_submit = {},
           meta = meta,
           sections = description.sections(meta, provider),
           lang = lang,
@@ -1735,6 +1929,7 @@ function M.open(problem, opts)
           busy = false,
           drawn = {},
         }
+        s.submit_provider = submit_candidates(s)[1] or provider
         util.mkdirp(vim.fs.dirname(s.path))
         status("Preparing the local solution and language-server support…")
         seed_file(s, s.path, function()
@@ -1763,6 +1958,7 @@ function M.open(problem, opts)
           prepare_oracle(s)
           render_ready(s)
           handle:finish("Ready")
+          resolve_submit_provider(s)
           discover_providers(s)
           augment_oracles(s, provider, lang, function()
             vim.schedule(function()

@@ -82,6 +82,36 @@ local function run()
   providers.submit(problem,{starterCode={swift='class Solution { func hasDuplicate(_ nums: [String]) -> Bool {} }'}},fixtures.swift.code,'swift','neetcode','leetcode',function(e)err=e end)
   assert(err and uploads==submitted_before,'incompatible signature uploaded unchecked code')
   print('Incompatible provider signatures are rejected before upload')
+
+  local nc_backend = providers.get('neetcode')
+  local nc_uploads = 0
+  nc_backend.submit = function(_, _, payload, _, cb)
+    nc_uploads = nc_uploads + 1
+    assert(payload == fixtures.cpp.code, 'same-provider fallback mutated payload')
+    cb(nil, { accepted = true })
+  end
+  backend.fetch = function(_, _, cb)
+    cb(nil, { provider = 'leetcode', question_id = '252', paid_only = true, starterCode = {}, availableLanguages = {}, test_case_type = 'function' })
+  end
+  local fallback_res, fallback_err, used_provider
+  providers.submit(problem, { starterCode = { cpp = fixtures.cpp.starter }, test_case_type = 'function' },
+    fixtures.cpp.code, 'cpp', 'neetcode', { 'leetcode', 'neetcode' },
+    function(e, r, used) fallback_err = e; fallback_res = r; used_provider = used end)
+  assert(not fallback_err and fallback_res and fallback_res.accepted, 'paid-locked judge did not fall back: ' .. tostring(fallback_err))
+  assert(used_provider == 'neetcode' and nc_uploads == 1 and uploads == submitted_before, 'fallback did not submit through neetcode')
+  assert(problem.providers.leetcode.paid == true, 'paid-only fetch did not record paid flag on problem')
+  print('Paid-locked submit judge falls through to the next provider in the chain')
+
+  backend.fetch = function(_, _, cb)
+    cb(nil, { provider = 'leetcode', question_id = '217', starterCode = { cpp = fixtures.cpp.judge }, test_case_type = 'function' })
+  end
+  fallback_err = nil
+  providers.submit(problem, { starterCode = { cpp = fixtures.cpp.starter }, test_case_type = 'function' },
+    'class Solution { public: bool wrongName(vector<int>& nums) { return false; } };',
+    'cpp', 'neetcode', { 'leetcode', 'neetcode' },
+    function(e) fallback_err = e end)
+  assert(fallback_err and nc_uploads == 1 and uploads == submitted_before, 'broken user solution fell through to next provider')
+  print('Broken user solution reports error instead of falling through the submit chain')
 end
 local ok, err = xpcall(run, debug.traceback)
 vim.fn.delete(root,'rf')

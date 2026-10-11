@@ -139,6 +139,24 @@ function M.paid_unlocked(name)
   return false
 end
 
+function M.locked(problem, name)
+  local record = type(problem) == "table" and type(problem.providers) == "table"
+    and problem.providers[name] or nil
+  return type(record) == "table" and record.paid == true and not M.paid_unlocked(name)
+end
+
+--- Whether `meta` from `name` carries an accessible `lang` starter for this user.
+function M.can_open(name, meta, lang)
+  if type(meta) ~= "table" then return false end
+  if meta.paid_only and not M.paid_unlocked(name) then return false end
+  if type(meta.availableLanguages) == "table"
+    and not vim.tbl_contains(meta.availableLanguages, lang) then
+    return false
+  end
+  local starter = type(meta.starterCode) == "table" and meta.starterCode[lang] or nil
+  return type(starter) == "string" and starter ~= ""
+end
+
 function M.ensure_id(problem, name, cb)
   local id = M.id(problem, name)
   if id then return cb(nil, id) end
@@ -153,28 +171,111 @@ function M.ensure_id(problem, name, cb)
   end)
 end
 
+local function is_provider_adapt_error(err)
+  if type(err) ~= "string" then return false end
+  return err:find("^the submit judge has no ") ~= nil
+    or err:find("^cross%-provider submission adaptation is not implemented") ~= nil
+    or err:find("^could not read the judge's ") ~= nil
+    or err:find("^could not read the content provider's ") ~= nil
+    or err:find("; use the judge's starter$") ~= nil
+end
+
 --- Cross-provider function submissions use the judge's signature in every language.
 --- Adapt only the payload; unsupported adapters fail before any code is uploaded.
-function M.submit(problem, meta, code, lang, content_provider, submit_provider, cb)
-  local backend = M.get(submit_provider)
-  if content_provider == submit_provider or meta.test_case_type == "class" then
-    return backend.submit(problem, meta, code, lang, cb)
+--- When `submit_provider` is a fallback list, providers that cannot open or
+--- adapt `problem` in `lang` (paid-locked, missing, or incompatible starter)
+--- fall through to the next candidate in the chain.
+function M.submit(problem, meta, code, lang, content_provider, submit_provider, cb, on_select)
+  local candidates = type(submit_provider) == "table" and submit_provider or { submit_provider }
+  local index = 0
+  local first_err, first_name
+
+  local function remember(name, err)
+    if not first_err then first_err, first_name = err, name end
   end
-  M.ensure_id(problem, submit_provider, function(err, id)
-    if err or not id then return cb(err or "problem is unavailable on " .. backend.label, nil) end
-    backend.fetch(problem, lang, function(fetch_err, judge)
-      if fetch_err or not judge then
-        return cb(fetch_err or "could not load " .. backend.label .. "'s " .. require("meatcode.lang").name(lang) .. " starter", nil)
+
+  local function try_next()
+    index = index + 1
+    local name = candidates[index]
+    if not name then
+      return cb(first_err or "no submit provider succeeded", nil, first_name)
+    end
+    local backend = M.get(name)
+    if not backend then return try_next() end
+    local has_more = index < #candidates
+
+    if name == content_provider then
+      if meta and meta.paid_only and not M.paid_unlocked(name) then
+        remember(name, (problem.name or "this problem") .. " is paid-only on " .. backend.label)
+        if has_more then return try_next() end
+        return cb(first_err, nil, first_name)
       end
-      if judge.test_case_type == "class" then
-        return cb("the submit judge requires a design-class API; use its starter", nil)
+      if on_select then on_select(name) end
+      return backend.submit(problem, meta, code, lang, function(err, data)
+        cb(err, data, name)
+      end)
+    end
+
+    if on_select then on_select(name) end
+    M.ensure_id(problem, name, function(err, id)
+      if err or not id then
+        remember(name, err or ("problem is unavailable on " .. backend.label))
+        if has_more then return try_next() end
+        return cb(first_err, nil, first_name)
       end
-      local payload, adapt_err = require("meatcode.submission").adapt(
-        code, lang, (meta.starterCode or {})[lang], (judge.starterCode or {})[lang])
-      if not payload then return cb(adapt_err, nil) end
-      backend.submit(problem, judge, payload, lang, cb)
+      backend.fetch(problem, lang, function(fetch_err, judge)
+        if type(judge) == "table" and judge.paid_only ~= nil
+          and type(problem) == "table" and type(problem.providers) == "table"
+          and type(problem.providers[name]) == "table" then
+          problem.providers[name].paid = judge.paid_only == true
+        end
+        if fetch_err or not judge then
+          remember(name, fetch_err or ("could not load " .. backend.label .. "'s " .. require("meatcode.lang").name(lang) .. " starter"))
+          if has_more then return try_next() end
+          return cb(first_err, nil, first_name)
+        end
+        if judge.paid_only and not M.paid_unlocked(name) then
+          remember(name, (problem.name or "this problem") .. " is paid-only on " .. backend.label)
+          if has_more then return try_next() end
+          return cb(first_err, nil, first_name)
+        end
+        if type(judge.availableLanguages) == "table"
+          and not vim.tbl_contains(judge.availableLanguages, lang) then
+          remember(name, require("meatcode.lang").name(lang) .. " is unavailable on " .. backend.label)
+          if has_more then return try_next() end
+          return cb(first_err, nil, first_name)
+        end
+        if meta.test_case_type == "class" then
+          local starter = type(judge.starterCode) == "table" and judge.starterCode[lang] or nil
+          if type(starter) ~= "string" or starter == "" then
+            remember(name, "the submit judge has no " .. require("meatcode.lang").name(lang) .. " starter signature")
+            if has_more then return try_next() end
+            return cb(first_err, nil, first_name)
+          end
+          return backend.submit(problem, judge, code, lang, function(sub_err, data)
+            cb(sub_err, data, name)
+          end)
+        end
+        if judge.test_case_type == "class" then
+          remember(name, "the submit judge requires a design-class API; use its starter")
+          if has_more then return try_next() end
+          return cb(first_err, nil, first_name)
+        end
+        local payload, adapt_err = require("meatcode.submission").adapt(
+          code, lang, (meta.starterCode or {})[lang], (judge.starterCode or {})[lang])
+        if not payload then
+          remember(name, adapt_err)
+          if has_more and is_provider_adapt_error(adapt_err) then return try_next() end
+          return cb(adapt_err, nil, name)
+        end
+        backend.submit(problem, judge, payload, lang, function(sub_err, data)
+          cb(sub_err, data, name)
+        end)
+      end)
     end)
-  end)
+  end
+
+  try_next()
 end
 
 function M.links(problem)

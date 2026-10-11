@@ -128,6 +128,25 @@ local function run()
   local before=text(results)
   require('meatcode.runner').set_cloud_mode('never')
   assert(text(results)==before,'state refresh overwrote submission result')
+  local lc_backend = providers.get('leetcode')
+  local orig_lc_fetch = lc_backend.fetch
+  lc_backend.fetch = function(_, _, cb)
+    cb(nil, {
+      schema = util.META_SCHEMA, provider = 'leetcode', name = 'Double', difficulty = 'Easy',
+      paid_only = true, description = '', starterCode = {}, availableLanguages = {},
+      custom_test_cases = {}, expected_outputs = {}, test_case_type = 'function',
+    })
+  end
+  vim.fn.delete(root .. '/meta/leetcode-lc-double.json')
+  providers.set_order('content', { 'neetcode', 'leetcode' })
+  providers.set_order('submit', { 'leetcode', 'neetcode' })
+  settle(function()
+    local active = ui.active()
+    return active and active.content == 'neetcode' and active.submit == 'neetcode'
+  end, 'paid-locked submit provider did not fall back to neetcode in active session')
+  local desc = buffer('meatcode-problem')
+  assert(desc and text(desc):match('LeetCode %[paid · locked%]'), 'description did not mark paid-locked provider')
+  lc_backend.fetch = orig_lc_fetch
   ui.run();ui.close()
   assert(not ui.is_session_tab(),'closing running problem left a live session')
   assert(util.read_file(py_path):match('time.sleep'),'closing problem lost saved edit')

@@ -100,6 +100,10 @@ local function render()
   state.rows = rows
 end
 
+function M.refresh()
+  render()
+end
+
 local function current()
   if not is_open() then return nil end
   return state.rows[vim.api.nvim_win_get_cursor(state.win)[1]]

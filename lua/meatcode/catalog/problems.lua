@@ -118,6 +118,12 @@ local function index()
       end
       local remembered = mappings[slug]
       if remembered then providers.lintcode = { id = tostring(remembered) } end
+      if nc_problem and type(nc_problem.providers) == "table" then
+        nc_problem.providers.leetcode = vim.deepcopy(providers.leetcode)
+        if providers.lintcode and not nc_problem.providers.lintcode then
+          nc_problem.providers.lintcode = vim.deepcopy(providers.lintcode)
+        end
+      end
       local problem = {
         key = "leetcode:" .. slug,
         name = item.title,
@@ -147,6 +153,11 @@ local function index()
         cat.by_provider.lintcode[id] = problem
         problem.topics = union(problem.topics, names(item.problem_tags))
         problem.companies = union(problem.companies, names(item.company_tags))
+        local lc = problem.providers.leetcode
+        local nc_problem = lc and nc and nc.by_provider.leetcode[lc.id] or nil
+        if nc_problem and type(nc_problem.providers) == "table" then
+          nc_problem.providers.lintcode = vim.deepcopy(problem.providers.lintcode)
+        end
       elseif not cat.by_provider.lintcode[id] then
         local providers = {
           lintcode = { id = id, paid = item.is_locked == true },
