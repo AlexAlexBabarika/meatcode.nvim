@@ -191,6 +191,7 @@ and rejection of incompatible signatures or future languages without adapters.
 
 ## TODO
 
+- Tie problem desc. and submission provider together to greatly reduce complexity.
 - Windows Sandboxing support for local solution oracle
 - Sorting and filtering in the problem list view
 - Fetch LintCode beat by % metric and render memory usage in human readable text
