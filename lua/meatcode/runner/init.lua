@@ -8,7 +8,7 @@ local util = require("meatcode.util")
 
 --- Runs a solution against the local suite. Oracle precedence is stage-major:
 --- an openleetcode checker, then reference, official editorial and popular
---- community solutions, then the cloud — the submit provider's own test run.
+--- community solutions, then the cloud — the serving provider's own test run.
 --- Provider fallback order only breaks ties inside a stage.
 ---
 --- Local candidates are validated one at a time in the background (`prepare`),
@@ -36,7 +36,7 @@ local EXECUTABLE_STAGES = { "reference", "editorial", "community" }
 ---@field error string|nil why the judge has no verdict for the case
 
 ---@class meatcode.CloudOracle
----@field provider string submit provider name
+---@field provider string name of the provider serving the problem
 ---@field test fun(code: string, cases: string[], cb: fun(err: string|nil, results: meatcode.CloudCase[]|nil)): fun()
 
 -- ------------------------------------------------------------ cloud setting
@@ -1579,7 +1579,7 @@ end
 --- Run `code` against `cases` locally.
 ---
 --- The selected local oracle judges, computing outputs for cases it has not
---- seen (sandboxed) first. The cloud oracle (`cloud`, the submit provider's test
+--- seen (sandboxed) first. The cloud oracle (`cloud`, the serving provider's test
 --- run) takes over when nothing local is selected yet, when the cloud setting
 --- forces it, and for problems that cannot run locally at all. Your solution
 --- always runs alone, unsandboxed.

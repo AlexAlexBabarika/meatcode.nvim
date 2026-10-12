@@ -16,11 +16,12 @@ CONTENTS                                                          *meatcode*
 
 Browse the NeetCode roadmap and the merged LeetCode/NeetCode/LintCode catalog,
 solve problems in real buffers, run matching NeetCode visible cases locally,
-and submit through the first provider in the submit chain that can open them.
+and submit to the provider serving the problem: the first one in the provider
+chain that can open it.
 
 Local runs resolve a stage-major oracle chain: an openleetcode checker,
 provider reference solutions, official editorials, sanity-checked popular
-community solutions, then the cloud — the submit judge's own test run,
+community solutions, then the cloud — the serving provider's own test run,
 checked against cached answers first. The provider chain breaks ties inside
 each stage.
 
@@ -124,15 +125,14 @@ Problem finder ~
 
 Solving ~
   <leader>nr            Run your cases against the selected oracle, or on the
-                        submit judge's test run (the cloud oracle); repeating
-                        it replaces the foreground local run
-  <leader>ns            Submit through the submit chain's judge; this cancels
-                        a foreground local run. The verdict names the provider
-                        that judged it
-  <leader>nR            Reset to the content provider's starter code
+                        judge's test run (the cloud oracle); repeating it
+                        replaces the foreground local run
+  <leader>ns            Submit to the provider serving the problem; this
+                        cancels a foreground local run
+  <leader>nR            Reset to the provider's starter code
   <leader>no            Fuzzy-pick a provider/solution/submissions/video link
-  <leader>nc            Reorder the content/submit fallback chains and choose
-                        when the cloud oracle replaces local ones (<CR> on its
+  <leader>nc            Reorder the provider fallback chain and choose when
+                        the cloud oracle replaces local ones (<CR> on its
                         row). The provider actually serving the open problem
                         is marked with a caret, which is not always the
                         topmost one.
@@ -169,7 +169,7 @@ adding candidates, the checker arriving) only try candidates not yet seen. The
 first survivor becomes the oracle; an executable one immediately precomputes
 outputs for your current suite.
 
-The cloud oracle is the submit judge's test run (LeetCode/NeetCode "Run",
+The cloud oracle is the serving provider's test run (LeetCode/NeetCode "Run",
 LintCode "Test"), logged in as for submitting. It is always cautious: the test
 run starts alongside your local run and is cancelled when every output matches
 a cached correct answer; otherwise the judge's verdict settles every case that
@@ -234,7 +234,7 @@ resources are not cgroup-limited.
 
 Problems that cannot be reproduced locally — SQL, and anything encoding
 arguments by reference such as clone-graph's adjacency list — run entirely on
-the submit judge's test run.
+the judge's test run.
 
 Use <leader>nt to add/remove local cases in an editor. Save with :w and close
 with :q. Solution edits are autosaved as you type, so switching languages,
@@ -351,15 +351,6 @@ Managed project changes reload only rust-analyzer clients rooted at solutions_di
 A user-owned rust-project.json is preserved; add the generated wrappers to it.
 Set runner.rust.rust_analyzer=false to disable generation.
 See doc/configuration.md for details.
-
-Function-style submissions to another provider load the judge's starter for
-Python, C++, Swift and Rust. Compatible entry-point names are bridged only in
-the submission payload; Swift argument labels are adapted too. For example,
-containsDuplicate can forward to hasDuplicate without changing your Swift file.
-Your local-run entry point is unchanged. Incompatible or unparseable signatures
-are rejected before upload. Same-provider submissions and design-class APIs
-are not rewritten. Future languages must register a submission adapter;
-missing adapters fail before upload instead of silently submitting unchecked code.
 
 Helper types are deliberately per problem rather than shared: `Node` is an
 adjacency list in Clone Graph and a random pointer in Copy List with Random

@@ -4,7 +4,7 @@
 discovers and caches every available oracle, with status messages for the
 statement, each provider and each solution source, then validates the local
 ones in the background (below). Local oracles need no network; the cloud oracle
-is the submit judge's own test run.
+is the judge's own test run.
 
 Oracle selection is **stage-major**, strongest first:
 
@@ -20,12 +20,12 @@ Oracle selection is **stage-major**, strongest first:
    LintCode candidates are sorted by their like count. Arbitrary community code
    is not trusted on reputation alone: it is only considered when at least one
    answer is known.
-5. **Cloud.** The submit provider's test run — LeetCode's and NeetCode's "Run",
-   LintCode's "Test" — checked against cached answers first (below).
+5. **Cloud.** The serving provider's test run — LeetCode's and NeetCode's
+   "Run", LintCode's "Test" — checked against cached answers first (below).
 
-The configured content-provider fallback chain applies **inside every stage**.
+The configured provider fallback chain applies **inside every stage**.
 For example, a NeetCode reference still beats a LeetCode editorial even when
-LeetCode is the preferred statement provider; provider preference only breaks
+LeetCode is the preferred provider; provider preference only breaks
 ties between candidates in the same stage.
 
 Every local oracle can judge any input, including cases you wrote. The results
@@ -60,7 +60,7 @@ It judges when:
   - *every problem*;
   - *never* — only as the fallback above.
 
-The test run uses your submit chain's judge and needs its login
+The test run uses the provider serving the problem and needs its login
 (`:MeatCode login ...`). The local suite is converted to that judge's input
 format: labels added or dropped, design cases re-laid out between LeetCode's
 two lines and NeetCode's single interleaved line. When the test run cannot

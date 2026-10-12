@@ -4,13 +4,13 @@ local M = {}
 --- filenames derive from this, so it never follows user configuration.
 M.NAMES = { "leetcode", "neetcode", "lintcode" }
 
---- Fallback-chain slots. `content` chooses statement/tests/starter, `submit`
---- chooses the judge. Chains persist in the cache dir and are edited through
---- the <leader>nc configurator, never via setup().
-M.SLOTS = { "content", "submit" }
+--- The one fallback chain: the first provider in it that can serve a problem
+--- supplies its statement, tests and starter code, and judges its runs and
+--- submissions. Persisted in the cache dir and edited through the <leader>nc
+--- configurator, never via setup().
 
 local loaded = {}
-local chains = nil
+local chain = nil
 
 function M.known(name)
   return vim.tbl_contains(M.NAMES, name)
@@ -28,13 +28,14 @@ function M.all()
   return out
 end
 
-local function chains_path()
-  return require("meatcode.config").options.cache_dir .. "/provider-chains.json"
+local function chain_path()
+  return require("meatcode.config").options.cache_dir .. "/provider-order.json"
 end
 
-local function sanitize(chain)
+--- Unknown names are dropped; an empty result falls back to every provider.
+local function sanitize(names)
   local out, seen = {}, {}
-  for _, name in ipairs(type(chain) == "table" and chain or {}) do
+  for _, name in ipairs(type(names) == "table" and names or {}) do
     if M.known(name) and not seen[name] then
       seen[name] = true
       table.insert(out, name)
@@ -44,30 +45,19 @@ local function sanitize(chain)
   return out
 end
 
-local function load_chains()
-  if chains then return chains end
-  local saved = require("meatcode.util").read_json(chains_path())
-  chains = {
-    content = sanitize(saved and saved.content),
-    submit = sanitize(saved and saved.submit),
-  }
-  return chains
+--- The provider fallback chain.
+function M.order()
+  if not chain then chain = sanitize(require("meatcode.util").read_json(chain_path())) end
+  return { unpack(chain) }
 end
 
---- The fallback chain for `slot` ("content" or "submit"). Unknown names are
---- dropped; an empty result falls back to every provider.
-function M.order(slot)
-  return { unpack(load_chains()[slot == "submit" and "submit" or "content"]) }
-end
-
---- Replace the fallback chain for `slot` and persist it as the new default.
+--- Replace the fallback chain and persist it as the new default.
 ---@return string[] the sanitized chain actually stored
-function M.set_order(slot, chain)
-  slot = slot == "submit" and "submit" or "content"
-  load_chains()[slot] = sanitize(chain)
-  require("meatcode.util").write_json(chains_path(), chains)
-  vim.api.nvim_exec_autocmds("User", { pattern = "MeatCodeStateChanged", data = { chain = slot } })
-  return M.order(slot)
+function M.set_order(names)
+  chain = sanitize(names)
+  require("meatcode.util").write_json(chain_path(), chain)
+  vim.api.nvim_exec_autocmds("User", { pattern = "MeatCodeStateChanged", data = { chain = true } })
+  return M.order()
 end
 
 function M.id(problem, name)
@@ -80,11 +70,11 @@ function M.available(problem, name)
   return M.id(problem, name) ~= nil
 end
 
---- Providers from `slot`'s chain that could serve `problem`. LintCode stays a
+--- Providers from the chain that could serve `problem`. LintCode stays a
 --- candidate whenever LeetCode is present, since its id resolves on demand.
-function M.candidates(problem, slot)
+function M.candidates(problem)
   local out = {}
-  for _, name in ipairs(M.order(slot)) do
+  for _, name in ipairs(M.order()) do
     if M.available(problem, name)
       or (name == "lintcode" and M.available(problem, "leetcode")) then
       table.insert(out, name)
@@ -169,113 +159,6 @@ function M.ensure_id(problem, name, cb)
     problem.providers[name].id = resolved
     cb(nil, resolved)
   end)
-end
-
-local function is_provider_adapt_error(err)
-  if type(err) ~= "string" then return false end
-  return err:find("^the submit judge has no ") ~= nil
-    or err:find("^cross%-provider submission adaptation is not implemented") ~= nil
-    or err:find("^could not read the judge's ") ~= nil
-    or err:find("^could not read the content provider's ") ~= nil
-    or err:find("; use the judge's starter$") ~= nil
-end
-
---- Cross-provider function submissions use the judge's signature in every language.
---- Adapt only the payload; unsupported adapters fail before any code is uploaded.
---- When `submit_provider` is a fallback list, providers that cannot open or
---- adapt `problem` in `lang` (paid-locked, missing, or incompatible starter)
---- fall through to the next candidate in the chain.
-function M.submit(problem, meta, code, lang, content_provider, submit_provider, cb, on_select)
-  local candidates = type(submit_provider) == "table" and submit_provider or { submit_provider }
-  local index = 0
-  local first_err, first_name
-
-  local function remember(name, err)
-    if not first_err then first_err, first_name = err, name end
-  end
-
-  local function try_next()
-    index = index + 1
-    local name = candidates[index]
-    if not name then
-      return cb(first_err or "no submit provider succeeded", nil, first_name)
-    end
-    local backend = M.get(name)
-    if not backend then return try_next() end
-    local has_more = index < #candidates
-
-    if name == content_provider then
-      if meta and meta.paid_only and not M.paid_unlocked(name) then
-        remember(name, (problem.name or "this problem") .. " is paid-only on " .. backend.label)
-        if has_more then return try_next() end
-        return cb(first_err, nil, first_name)
-      end
-      if on_select then on_select(name) end
-      return backend.submit(problem, meta, code, lang, function(err, data)
-        cb(err, data, name)
-      end)
-    end
-
-    if on_select then on_select(name) end
-    M.ensure_id(problem, name, function(err, id)
-      if err or not id then
-        remember(name, err or ("problem is unavailable on " .. backend.label))
-        if has_more then return try_next() end
-        return cb(first_err, nil, first_name)
-      end
-      backend.fetch(problem, lang, function(fetch_err, judge)
-        if type(judge) == "table" and judge.paid_only ~= nil
-          and type(problem) == "table" and type(problem.providers) == "table"
-          and type(problem.providers[name]) == "table" then
-          problem.providers[name].paid = judge.paid_only == true
-        end
-        if fetch_err or not judge then
-          remember(name, fetch_err or ("could not load " .. backend.label .. "'s " .. require("meatcode.lang").name(lang) .. " starter"))
-          if has_more then return try_next() end
-          return cb(first_err, nil, first_name)
-        end
-        if judge.paid_only and not M.paid_unlocked(name) then
-          remember(name, (problem.name or "this problem") .. " is paid-only on " .. backend.label)
-          if has_more then return try_next() end
-          return cb(first_err, nil, first_name)
-        end
-        if type(judge.availableLanguages) == "table"
-          and not vim.tbl_contains(judge.availableLanguages, lang) then
-          remember(name, require("meatcode.lang").name(lang) .. " is unavailable on " .. backend.label)
-          if has_more then return try_next() end
-          return cb(first_err, nil, first_name)
-        end
-        if meta.test_case_type == "class" then
-          local starter = type(judge.starterCode) == "table" and judge.starterCode[lang] or nil
-          if type(starter) ~= "string" or starter == "" then
-            remember(name, "the submit judge has no " .. require("meatcode.lang").name(lang) .. " starter signature")
-            if has_more then return try_next() end
-            return cb(first_err, nil, first_name)
-          end
-          return backend.submit(problem, judge, code, lang, function(sub_err, data)
-            cb(sub_err, data, name)
-          end)
-        end
-        if judge.test_case_type == "class" then
-          remember(name, "the submit judge requires a design-class API; use its starter")
-          if has_more then return try_next() end
-          return cb(first_err, nil, first_name)
-        end
-        local payload, adapt_err = require("meatcode.submission").adapt(
-          code, lang, (meta.starterCode or {})[lang], (judge.starterCode or {})[lang])
-        if not payload then
-          remember(name, adapt_err)
-          if has_more and is_provider_adapt_error(adapt_err) then return try_next() end
-          return cb(adapt_err, nil, name)
-        end
-        backend.submit(problem, judge, payload, lang, function(sub_err, data)
-          cb(sub_err, data, name)
-        end)
-      end)
-    end)
-  end
-
-  try_next()
 end
 
 function M.links(problem)

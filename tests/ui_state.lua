@@ -60,8 +60,7 @@ if vim.env.MEATCODE_NO_SETUP then
   require('meatcode.config').setup(opts)
   require('meatcode.ui.highlight').setup()
 else mc.setup(opts)end
-providers.set_order('content',{'neetcode'})
-providers.set_order('submit',{'neetcode'})
+providers.set_order({'neetcode'})
 vim.cmd('runtime plugin/meatcode.lua')
 local ui=require('meatcode.ui.problem')
 local function text(buf)return table.concat(vim.api.nvim_buf_get_lines(buf,0,-1,false),'\n')end
@@ -109,9 +108,9 @@ local function run()
   vim.cmd('MeatCode lang python')
   settle(function()return ui.is_session_tab() and vim.api.nvim_get_current_buf()==py end,'saved Python solution was not reopened')
   assert(text(py):match('return n %* 3'),'reopened Python solution not preserved')
-  providers.set_order('content',{'leetcode','neetcode'})
-  settle(function()local active=ui.active();return active and active.content=='leetcode' and vim.api.nvim_get_current_buf()==py end,'content chain change did not reopen existing problem immediately')
-  assert(text(py):match('return n %* 3'),'content chain cutover lost the saved solution')
+  providers.set_order({'leetcode','neetcode'})
+  settle(function()local active=ui.active();return active and active.provider=='leetcode' and vim.api.nvim_get_current_buf()==py end,'chain change did not reopen existing problem immediately')
+  assert(text(py):match('return n %* 3'),'chain cutover lost the saved solution')
   vim.api.nvim_buf_set_lines(py,0,-1,false,{'import time','class Solution:','    def double(self,n):','        time.sleep(20)','        return n*2'})
   vim.api.nvim_exec_autocmds('TextChangedI',{buffer=py})
   ui.run()
@@ -138,12 +137,11 @@ local function run()
     })
   end
   vim.fn.delete(root .. '/meta/leetcode-lc-double.json')
-  providers.set_order('content', { 'neetcode', 'leetcode' })
-  providers.set_order('submit', { 'leetcode', 'neetcode' })
+  providers.set_order({ 'leetcode', 'neetcode' })
   settle(function()
     local active = ui.active()
-    return active and active.content == 'neetcode' and active.submit == 'neetcode'
-  end, 'paid-locked submit provider did not fall back to neetcode in active session')
+    return active and active.provider == 'neetcode'
+  end, 'paid-locked provider did not fall back to neetcode in active session')
   local desc = buffer('meatcode-problem')
   assert(desc and text(desc):match('LeetCode %[paid · locked%]'), 'description did not mark paid-locked provider')
   lc_backend.fetch = orig_lc_fetch

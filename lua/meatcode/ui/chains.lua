@@ -5,10 +5,11 @@ local runner = require("meatcode.runner")
 local tabs = require("meatcode.ui.tab")
 local util = require("meatcode.util")
 
---- Fallback-chain configurator: reorder the content chain (statement, tests,
---- starter) and the submit chain (judge) per slot, and choose when the submit
---- judge's test run (the cloud oracle) replaces local oracles. Saving persists
---- both as the new default for every problem opened afterwards.
+--- Fallback-chain configurator: reorder the provider chain (statement, tests,
+--- starter code and judge all come from the first provider that can serve a
+--- problem) and choose when that judge's test run (the cloud oracle) replaces
+--- local oracles. Saving persists both as the new default for every problem
+--- opened afterwards.
 local M = {}
 
 --- What each cloud-oracle setting means, in `runner.CLOUD_MODES` order.
@@ -18,7 +19,7 @@ local CLOUD_MODE_LABEL = {
   never = "never (only when nothing local is available)",
 }
 
-local state = { buf = nil, win = nil, rows = {}, slot = "content" }
+local state = { buf = nil, win = nil, rows = {} }
 
 local function is_open()
   return state.win and vim.api.nvim_win_is_valid(state.win)
@@ -30,13 +31,12 @@ function M.close()
   state.win, state.buf, state.rows = nil, nil, {}
 end
 
-
-local function move(slot, from, delta)
-  local chain = providers.order(slot)
+local function move(from, delta)
+  local chain = providers.order()
   local to = from + delta
   if from < 1 or from > #chain or to < 1 or to > #chain then return end
   chain[from], chain[to] = chain[to], chain[from]
-  providers.set_order(slot, chain)
+  providers.set_order(chain)
 end
 
 --- Advance the cloud-oracle setting to the next mode.
@@ -53,31 +53,24 @@ end
 local function render()
   if not is_open() then return end
   local active = require("meatcode.ui.problem").active()
-  local lines, spans, rows = { "", "  provider fallback chains", "" }, {}, {}
-  table.insert(spans, { 1, 2, 2 + #"provider fallback chains", "MeatCodeHeader" })
+  local lines, spans, rows = { "", "  provider fallback chain", "" }, {}, {}
+  table.insert(spans, { 1, 2, 2 + #"provider fallback chain", "MeatCodeHeader" })
 
-  local function section(slot, blurb)
-    table.insert(lines, "  " .. slot)
-    table.insert(spans, { #lines - 1, 2, 2 + #slot, "MeatCodeMuted" })
-    table.insert(lines, "  " .. blurb)
-    table.insert(spans, { #lines - 1, 2, #lines[#lines], "MeatCodeMuted" })
-    for i, name in ipairs(providers.order(slot)) do
-      local backend = providers.get(name)
-      local in_use = active and active[slot] == name
-      local line = string.format("  %s %d. %s", in_use and "▸" or " ", i, backend.label)
-      table.insert(lines, line)
-      table.insert(spans, { #lines - 1, #line - #backend.label, #line, in_use and "MeatCodePass" or "MeatCodeKey" })
-      rows[#lines] = { slot = slot, index = i }
-    end
-    table.insert(lines, "")
+  table.insert(lines, "  statement, tests, starter code and judge")
+  table.insert(spans, { #lines - 1, 2, #lines[#lines], "MeatCodeMuted" })
+  for i, name in ipairs(providers.order()) do
+    local backend = providers.get(name)
+    local in_use = active and active.provider == name
+    local line = string.format("  %s %d. %s", in_use and "▸" or " ", i, backend.label)
+    table.insert(lines, line)
+    table.insert(spans, { #lines - 1, #line - #backend.label, #line, in_use and "MeatCodePass" or "MeatCodeKey" })
+    rows[#lines] = { index = i }
   end
-
-  section("content", "statement, visible tests, starter code")
-  section("submit", "cloud judge (WIP solution is never touched)")
+  table.insert(lines, "")
 
   table.insert(lines, "  cloud oracle")
   table.insert(spans, { #lines - 1, 2, 2 + #"cloud oracle", "MeatCodeMuted" })
-  table.insert(lines, "  the submit judge's test run, cached answers first")
+  table.insert(lines, "  the problem's judge's test run, cached answers first")
   table.insert(spans, { #lines - 1, 2, #lines[#lines], "MeatCodeMuted" })
   local mode_label = CLOUD_MODE_LABEL[runner.cloud_mode()]
   local mode_line = "    replaces local oracles for: " .. mode_label
@@ -115,12 +108,12 @@ local function keymaps()
   end
   local function nudge(delta)
     local row = current()
-    if not row or not row.slot then return util.notify("put the cursor on a provider row") end
-    move(row.slot, row.index, delta)
+    if not row or not row.index then return util.notify("put the cursor on a provider row") end
+    move(row.index, delta)
     render()
     local target = nil
     for linenr, entry in pairs(state.rows) do
-      if entry.slot == row.slot and entry.index == row.index + delta then target = linenr end
+      if entry.index == row.index + delta then target = linenr end
     end
     if target then pcall(vim.api.nvim_win_set_cursor, state.win, { target, 0 }) end
   end
@@ -131,7 +124,7 @@ local function keymaps()
   map("<Tab>", function()
     local starts, seen = {}, {}
     for linenr, entry in pairs(state.rows) do
-      local section = entry.slot or entry.setting
+      local section = entry.setting or "providers"
       if not seen[section] or linenr < seen[section] then seen[section] = linenr end
     end
     for _, linenr in pairs(seen) do table.insert(starts, linenr) end
@@ -152,8 +145,8 @@ local function keymaps()
     cycle_cloud_mode()
     render()
   end, "Change setting")
-  map("q", M.close, "Close chains")
-  map("<Esc>", M.close, "Close chains")
+  map("q", M.close, "Close chain")
+  map("<Esc>", M.close, "Close chain")
 end
 
 function M.open()
@@ -164,7 +157,7 @@ function M.open()
   state.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.buf].bufhidden = "wipe"
   vim.bo[state.buf].filetype = "meatcode-chains"
-  tabs.name_buffer(state.buf, "provider chains")
+  tabs.name_buffer(state.buf, "provider chain")
 
   local width = math.min(vim.o.columns - 8, 84)
   local height = math.min(vim.o.lines - 8, 24)
@@ -176,7 +169,7 @@ function M.open()
     col = math.floor((vim.o.columns - width) / 2),
     style = "minimal",
     border = config.options.ui.border,
-    title = " Provider chains ",
+    title = " Provider chain ",
     title_pos = "center",
   })
   vim.wo[state.win][0].cursorline = true

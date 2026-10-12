@@ -14,7 +14,7 @@ local function supported(t, records)
   return inner and records and records[inner]~=nil or false
 end
 local function uncomment(text) return structure.strip(text) end
-local function parameters(text, unrestricted, records)
+local function parameters(text, records)
   local out, start, depth = {}, 1, 0
   for i = 1, #text + 1 do
     local ch = text:sub(i,i)
@@ -27,127 +27,40 @@ local function parameters(text, unrestricted, records)
         if not typ then name, typ = part:match("^mut%s+([%w_]+)%s*:%s*(.+)$") end
         if not typ then return nil, "could not parse Rust parameter `" .. part .. "`" end
         typ = clean(typ)
-        local declared_type = typ
         local borrow
         if typ:sub(1,4) == "&mut" then borrow="mut"; typ=typ:sub(5)
         elseif typ:sub(1,1) == "&" then borrow="ref"; typ=typ:sub(2) end
         if borrow and typ == "str" then typ="String" end
         if borrow and typ:match("^%[.*%]$") then typ="Vec<" .. typ:sub(2,-2) .. ">" end
-        if not unrestricted and not supported(typ,records) then return nil, "unsupported Rust parameter type `" .. typ .. "`" end
-        out[#out+1] = { name=name,type=typ,borrow=borrow,declared_type=declared_type }
+        if not supported(typ,records) then return nil, "unsupported Rust parameter type `" .. typ .. "`" end
+        out[#out+1] = { name=name,type=typ,borrow=borrow }
       end
       start = i + 1
     end
   end
   return out
 end
-local function methods(text, unrestricted, records)
+local function methods(text, records)
   local out = {}
   for name, args, suffix in text:gmatch("fn%s+([%w_]+)%s*(%b())%s*([^{}]*){") do
-    local params, err = parameters(args:sub(2,-2), unrestricted, records)
+    local params, err = parameters(args:sub(2,-2), records)
     if not params then return nil, err end
     local ret = clean(suffix:match("%-%>%s*(.-)%s*$") or "()")
-    if not unrestricted and ret ~= "()" and ret ~= "Self" and not supported(ret,records) then return nil, "unsupported Rust result type `" .. ret .. "`" end
+    if ret ~= "()" and ret ~= "Self" and not supported(ret,records) then return nil, "unsupported Rust result type `" .. ret .. "`" end
     out[#out+1] = { name=name,params=params,ret=ret }
   end
   return out
 end
-local function signature(starter, unrestricted, code, ref)
-  local records
-  if not unrestricted then
-    local schemas, schema_err = structure.discover(starter, code, ref)
-    if not schemas then return nil, schema_err end
-    records = schemas.records
-  end
+function M.parse_signature(starter, code, ref)
+  local schemas, schema_err = structure.discover(starter, code, ref)
+  if not schemas then return nil, schema_err end
   local src = uncomment(starter or "")
   local body = src:match("impl%s+Solution%s*{(.*)")
   if not body then return nil, "could not find impl Solution in the Rust starter" end
-  local parsed, err = methods(body, unrestricted, records)
+  local parsed, err = methods(body, schemas.records)
   if not parsed then return nil, err end
   if not parsed[1] then return nil, "could not parse a Rust Solution method" end
   return parsed[1]
-end
-function M.parse_signature(starter, code, ref) return signature(starter, false, code, ref) end
-
---- Inspect declarations without confusing comments or literals with Rust code.
-local function has_solution_method(code, name)
-  local tokens, i = {}, 1
-  while i <= #code do
-    local ch, pair = code:sub(i, i), code:sub(i, i + 1)
-    local _, raw_end, hashes = code:find('^r(#*)"', i)
-    local character = ch == "'" and code:sub(i + 1):match("^([\1-\127\194-\244][\128-\191]*)'") or nil
-    if pair == "//" then
-      i = code:find("\n", i + 2, true) or (#code + 1)
-      tokens[#tokens + 1] = " "
-    elseif pair == "/*" then
-      local depth = 1
-      i = i + 2
-      while i <= #code and depth > 0 do
-        pair = code:sub(i, i + 1)
-        if pair == "/*" then depth = depth + 1; i = i + 2
-        elseif pair == "*/" then depth = depth - 1; i = i + 2
-        else i = i + 1 end
-      end
-      tokens[#tokens + 1] = " "
-    elseif raw_end then
-      local _, finish = code:find('"' .. hashes, raw_end + 1, true)
-      i = finish and finish + 1 or #code + 1
-      tokens[#tokens + 1] = " "
-    elseif ch == '"' or (ch == "'" and code:sub(i + 1, i + 1) == "\\") then
-      local quote = ch
-      i = i + 1
-      while i <= #code do
-        ch = code:sub(i, i)
-        i = i + (ch == "\\" and 2 or 1)
-        if ch == quote then break end
-      end
-      tokens[#tokens + 1] = " "
-    elseif character then
-      i = i + #character + 2
-      tokens[#tokens + 1] = " "
-    else
-      tokens[#tokens + 1] = ch
-      i = i + 1
-    end
-  end
-  for body in table.concat(tokens):gmatch("impl%s+Solution%s*(%b{})") do
-    local depth = 0
-    for pos = 1, #body do
-      local ch = body:sub(pos, pos)
-      if ch == "{" then depth = depth + 1
-      elseif ch == "}" then depth = depth - 1
-      elseif depth == 1 and body:find("^fn%s+" .. name .. "%s*%(", pos) then return true end
-    end
-  end
-  return false
-end
-
---- Bridge compatible provider entry points in the payload, never the buffer.
---- Forwarding preserves recursion, helper methods, comments and string literals.
-function M.adapt_submission(code, starter, judge_starter)
-  local target, err = signature(judge_starter, true)
-  if not target then return nil, "could not read the judge's Rust signature: " .. err end
-  if has_solution_method(code, target.name) then return code end
-  local source; source, err = signature(starter, true)
-  if not source then return nil, "could not read the content provider's Rust signature: " .. err end
-  if source.name == target.name then return code end
-  if source.ret ~= target.ret or #source.params ~= #target.params then
-    return nil, "Rust entry-point signatures differ beyond their names; use the judge's starter"
-  end
-  local args = {}
-  for i, param in ipairs(target.params) do
-    local original = source.params[i]
-    if param.declared_type ~= original.declared_type then
-      return nil, "Rust entry-point parameter " .. i .. " differs between providers; use the judge's starter"
-    end
-    args[i] = param.name
-  end
-  if not has_solution_method(code, source.name) then
-    return nil, "Rust solution must implement `" .. source.name .. "` or `" .. target.name .. "`"
-  end
-  local params, suffix = uncomment(judge_starter):match("fn%s+" .. target.name .. "%s*(%b())%s*([^{}]*){")
-  return code .. "\n\nimpl Solution {\n    pub fn " .. target.name .. params .. " " .. vim.trim(suffix)
-    .. " {\n        Self::" .. source.name .. "(" .. table.concat(args, ", ") .. ")\n    }\n}\n"
 end
 function M.parse_class(starter, code, ref, target)
   local src=uncomment(starter or "")
@@ -172,7 +85,7 @@ function M.parse_class(starter, code, ref, target)
   if #bodies==0 then return nil,"could not find impl "..name.." in the Rust starter" end
   local schemas,schema_err=structure.discover(starter,code,ref,name)
   if not schemas then return nil,schema_err end
-  local parsed,err=methods(table.concat(bodies,"\n"),false,schemas.records)
+  local parsed,err=methods(table.concat(bodies,"\n"),schemas.records)
   if not parsed then return nil, err end
   local cls = { name=name,methods={},ctor={},records=schemas.records }
   for _, method in ipairs(parsed) do

@@ -3,7 +3,7 @@ local providers = require("meatcode.providers")
 local util = require("meatcode.util")
 
 --- Which languages a problem can actually be solved in, and whether it is
---- reachable at all, merged across every content-chain candidate. A probe
+--- reachable at all, merged across every provider-chain candidate. A probe
 --- fetches each candidate provider's raw metadata once (the same request
 --- opening the problem would make, so it already carries this user's real
 --- credentials), unions their `availableLanguages`, and notes when every
@@ -61,7 +61,7 @@ local function store(problem, entry)
   for _, listener in ipairs(state.listeners) do pcall(listener, problem) end
 end
 
---- Access and the provider union depend on credentials and the content chain.
+--- Access and the provider union depend on credentials and the provider chain.
 function M.invalidate()
   state.generation = state.generation + 1
   state.data, state.pending = {}, {}
@@ -87,7 +87,7 @@ function M.on_update(fn)
 end
 
 --- Whether `problem` has been probed and confirmed to not support `lang` on
---- any content-chain candidate.
+--- any provider-chain candidate.
 function M.is_unsupported(problem, lang)
   local languages = M.known(problem)
   if not languages then return false end
@@ -95,7 +95,7 @@ function M.is_unsupported(problem, lang)
 end
 
 --- Whether `problem` has been probed and confirmed inaccessible on every
---- content-chain candidate for this user specifically -- either there is no
+--- provider-chain candidate for this user specifically -- either there is no
 --- candidate at all, or every candidate's own (already-authenticated)
 --- response withheld every language while flagged paid-only. Unlike a plain
 --- language mismatch this can never resolve itself by switching
@@ -134,7 +134,7 @@ function M.is_checking(problem)
   return key ~= nil and state.pending[key] ~= nil
 end
 
---- Probe every content-chain candidate for `problem` and persist the merged
+--- Probe every provider-chain candidate for `problem` and persist the merged
 --- language set. `cb(languages, locked, err)` receives the merged set
 --- (possibly empty when every candidate genuinely reports no languages) and
 --- whether every candidate turned out to be a permanent access wall for this
@@ -169,7 +169,7 @@ function M.check(problem, cb)
     for _, waiter in ipairs(waiters) do waiter(languages, locked, err) end
   end
 
-  local candidates = providers.candidates(problem, "content")
+  local candidates = providers.candidates(problem)
   if #candidates == 0 then
     store(problem, { languages = {}, locked = true, checked_at = os.time() })
     return finish({}, true, nil)
@@ -250,7 +250,7 @@ local BACKGROUND_DELAY_MS = 500
 
 --- Warm the persisted availability cache for every currently unknown problem.
 --- A sweep is deliberately serial: each `check` may itself follow multiple
---- content-chain providers, so parallelising catalog-wide work would turn one
+--- provider-chain providers, so parallelising catalog-wide work would turn one
 --- background task into a request burst. Calling this again while a sweep is
 --- running merges new catalog entries into the same queue.
 ---@param problems table[]

@@ -10,7 +10,7 @@ a merged catalog, solve/test locally, submit to any of the three.
 - Test locally (fast) against an [openleetcode](https://github.com/therepanic/openleetcode) checker or a sandboxed reference 'oracle' solution, falling back to the judge's own test run — which also settles problems with more than one right answer ([how](doc/local-runs.md)).
 - Editable test cases (can also take from failed submissions) ([more](doc/local-runs.md)).
 - C++ autocomplete sees exactly the types each problem defines, via a generated per-problem header ([why](doc/cpp.md)).
-- Statements, tests, starter code and submissions fall through a reorderable chain across all 3 providers.
+- Statements, tests, starter code and the judge come from the first provider in a reorderable chain that can serve the problem, across all 3 providers.
 - Browse NeetCode's roadmap as an ASCII DAG.
 - Completions is counted from your real cloud submission history, merged across all 3 providers ([how](doc/progress.md)).
 - Your solution is an autosaved file on disk, so LSP, treesitter, formatter and your keymaps just work.
@@ -35,7 +35,7 @@ a merged catalog, solve/test locally, submit to any of the three.
   everything still works through plain `vim.notify`.
 
 Python, C++, Swift and Rust are the supported solution languages. Unsupported
-problem signatures use the submit judge's test run. Rust needs no Cargo project
+problem signatures use the judge's test run. Rust needs no Cargo project
 or downloaded crates; see [local coverage](doc/local-runs.md#what-runs-locally).
 For Rust IntelliSense, configure rust-analyzer and install the standard-library
 sources (`rust-src`); MeatCode generates its non-Cargo project and judge context
@@ -123,7 +123,7 @@ in that language; edits are saved automatically, with no save prompt.
 | `<leader>na` | Add the last failed submission input as a case |
 | `<leader>nR` | Reset the solution to the starter code |
 | `<leader>no` | Open a provider/solution/submissions/video link |
-| `<leader>nc` | Reorder the provider chains; choose when the cloud oracle judges |
+| `<leader>nc` | Reorder the provider chain; choose when the cloud oracle judges |
 | `<CR>`/`<Tab>` | Open the hint, link or diagram under the cursor |
 | `q` | Close |
 
@@ -160,9 +160,6 @@ nvim --headless -u NONE -l tests/swift_structures.lua
 nvim --headless -u NONE -l tests/ui_state.lua
 MEATCODE_NO_SETUP=1 nvim --headless -u NONE -l tests/ui_state.lua
 MEATCODE_RUST_ANALYZER=/path/to/rust-analyzer nvim --headless -u NONE -l tests/rust_editor.lua
-nvim --headless -u NONE -l tests/submission.lua
-nvim --headless -u NONE -l tests/swift_submission.lua
-nvim --headless -u NONE -l tests/submission_languages.lua
 ```
 
 The runner check needs Python, Swift, Rust, and a supported sandbox.
@@ -181,17 +178,10 @@ exercise the Telescope catalogue, set `MEATCODE_PICKER=1`,
 to your plenary.nvim checkout when running `tests/ui_state.lua`.
 
 The Rust editor check additionally needs rust-analyzer and `rust-src`; it checks
-completion, compiler diagnostics, clean solution files, isolated helper types,
-and cross-provider Rust submission entry points.
-
-The submission checks compile/run real Swift, Rust, C++ and Python judge
-payloads. They cover provider method names, Swift labels/inout, reference and
-move-only arguments, existing entry points, recursion, literal/comment decoys,
-and rejection of incompatible signatures or future languages without adapters.
+completion, compiler diagnostics, clean solution files and isolated helper types.
 
 ## TODO
 
-- Tie problem desc. and submission provider together to greatly reduce complexity.
 - Windows Sandboxing support for local solution oracle
 - Sorting and filtering in the problem list view
 - Fetch LintCode beat by % metric and render memory usage in human readable text

@@ -108,7 +108,7 @@ local defaults = {
 			-- Fuzzy-pick one of the statement's links (provider pages,
 			-- solutions, video) and open it in the browser.
 			links = "<leader>no",
-			-- Edit the content/submit provider fallback chains and the cloud oracle.
+			-- Edit the provider fallback chain and the cloud oracle.
 			configure = "<leader>nc",
 			quit = "q",
 		},

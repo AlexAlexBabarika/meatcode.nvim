@@ -80,19 +80,19 @@ vim.api.nvim_create_autocmd("User", {
   group = vim.api.nvim_create_augroup("MeatCodeSharedState", { clear = true }),
   pattern = "MeatCodeStateChanged",
   callback = function(ev)
-    if ev.data and (ev.data.auth or ev.data.chain == "content") then
+    if ev.data and (ev.data.auth or ev.data.chain) then
       availability.invalidate()
       local cat = problem_catalog.get() or problem_catalog.load()
       if cat then availability.warm(cat.problems) end
     end
-    if ev.data and ev.data.chain == "content" then
+    if ev.data and ev.data.chain then
       require("meatcode.ui.problem").refresh_content()
     end
     pcall(function() require("meatcode.ui.home").refresh(ev.data) end)
     pcall(function() require("meatcode.ui.roadmap").refresh() end)
     pcall(function() require("meatcode.ui.problems").refresh() end)
     pcall(function() require("meatcode.ui.list").refresh() end)
-    pcall(function() require("meatcode.ui.problem").refresh_chains() end)
+    pcall(function() require("meatcode.ui.problem").refresh_ready() end)
     pcall(function() require("meatcode.ui.chains").refresh() end)
   end,
 })

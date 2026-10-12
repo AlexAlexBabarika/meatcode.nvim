@@ -30,7 +30,7 @@ for _, backend in ipairs(providers.all()) do
   backend.normalize_submission=function(data)return data end
 end
 require('meatcode').setup({solutions_dir=root,cache_dir=root..'/cache',lang='rust',ui={images=false}})
-providers.set_order('content',{'neetcode'});providers.set_order('submit',{'neetcode'})
+providers.set_order({'neetcode'})
 local ui=require('meatcode.ui.problem')
 local editor=require('meatcode.runner.rust_editor')
 local client
@@ -97,73 +97,6 @@ local function run()
     end
   end,'Rust solution failed its real local run: '..tostring(results))
   print('Cloud submission contains only user code; real local Rust run passes')
-  local rust=require('meatcode.runner.rust')
-  local runner=require('meatcode.runner')
-  local function judge_run(id,code,starter,cases,outputs,cb)
-    runner.run(id,code,'rust',{starterCode={rust=starter},custom_test_cases=cases,expected_outputs=outputs,test_case_type='function'},cases,cb)
-  end
-  local judge='impl Solution { pub fn solve(value: i32) -> i32 { value } }'
-  local backend=providers.get('leetcode')
-  backend.fetch=function(_,_,cb)cb(nil,{provider='leetcode',question_id='42',starterCode={rust=judge},test_case_type='function'})end
-  local judged
-  backend.submit=function(_,meta,payload,_,cb)
-    judge_run('provider-signature',payload,meta.starterCode.rust,{'2'},{'2'},function(report)
-      judged=report;cb(nil,report)
-    end)
-  end
-  backend.normalize_submission=function(report)
-    return {accepted=report.ok and report.passed==1,status=report.ok and report.passed==1 and 'Accepted' or 'Compile Error',compile_output=report.error}
-  end
-  providers.set_order('submit',{'leetcode'})
-  ui.submit()
-  settle(function()return judged~=nil end,'cross-provider submission did not reach the judge')
-  assert(judged.ok and judged.passed==1,vim.inspect(judged))
-  assert(table.concat(vim.api.nvim_buf_get_lines(buf,0,-1,false),'\n')==original,'judge adaptation changed the solution buffer')
-  print('NeetCode source submits to a different Rust judge entry point without modifying the solution')
-
-  local function adapted_run(id,code,source,target,cases,outputs)
-    local payload,err=rust.adapt_submission(code,source,target)
-    assert(payload,err)
-    local report
-    judge_run(id,payload,target,cases,outputs,function(r)report=r end)
-    settle(function()return report~=nil end,id..' timed out')
-    assert(report.ok and report.passed==#cases,id..': '..vim.inspect(report))
-  end
-  local recursive=[=[
-struct Other;
-impl Other { fn solve(n: i32) -> i32 { n } }
-impl Solution {
-    fn helper(n: i32) -> i32 { n }
-    pub fn factorial(n: i32) -> i32 {
-        let _literal = r###"pub fn solve(n: i32) -> i32 { }"###;
-        let _brace = '}';
-        /* nested /* fn solve(n: i32) { } */ comment */
-        fn solve(n: i32) -> i32 { n }
-        if n == 0 { 1 } else { Self::helper(n) * Self::factorial(n - 1) }
-    }
-}
-]=]
-  adapted_run('recursive-entry',recursive,'impl Solution { pub fn factorial(n: i32) -> i32 { 0 } }',judge,{'0','5'},{'1','120'})
-  adapted_run('existing-entry','impl Solution { pub fn solve(n: i32) -> i32 { n+3 } }',original,judge,{'2'},{'5'})
-  local mutation='impl Solution { pub fn reverse(nums: &mut Vec<i32>) { nums.reverse(); } }'
-  adapted_run('borrowed-entry',mutation,mutation,'impl Solution { pub fn reorder(values: &mut Vec<i32>) {} }',{'[1,2,3]','[]'},{'[3,2,1]','[]'})
-  local payload,err=rust.adapt_submission(mutation,mutation,'impl Solution { pub fn reorder(values: &mut [i32]) {} }')
-  assert(payload==nil,'incompatible borrowed types were accepted')
-  payload,err=rust.adapt_submission(original,original,'impl Solution { pub fn solve(value: i32) -> bool { false } }')
-  assert(payload==nil,'incompatible return types were accepted')
-  print('Rust judge adaptation preserves recursion and literals, accepts existing entry points, and checks exact borrowed types')
-  local opaque='type Items=Vec<i32>; impl Solution { pub fn identity(items: Items) -> Items { items } }'
-  local opaque_source='impl Solution { pub fn identity(items: Items) -> Items {} }'
-  local opaque_judge='impl Solution { pub fn solve(values: Items) -> Items {} }'
-  payload,err=rust.adapt_submission(opaque,opaque_source,opaque_judge)
-  assert(payload,err)
-  local opaque_path=root..'/opaque.rs'
-  util.write_file(opaque_path,'struct Solution;\n'..payload..'\nfn main() { assert_eq!(Solution::solve(vec![3,1,4]),vec![3,1,4]); }\n')
-  local compiled=vim.system({'rustc','--edition=2021','-o',root..'/opaque',opaque_path},{text=true}):wait()
-  assert(compiled.code==0,compiled.stderr)
-  local executed=vim.system({root..'/opaque'},{text=true}):wait()
-  assert(executed.code==0,executed.stderr)
-  print('Cloud Rust entry-point adaptation also preserves types unsupported by local serialization')
   -- Same filename in different topics must not share custom Node definitions.
   local a=root..'/graphs/node.rs';local b=root..'/lists/node.rs'
   local graph='// #[derive(Clone)]\n// pub struct Node { pub neighbors: Vec<i32> }\nimpl Solution { pub fn test(n: Node) -> usize { n.clone().neighbors.len() } }'

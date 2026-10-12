@@ -27,4 +27,6 @@ What each API expects on the wire is in [api/leetcode.md](api/leetcode.md),
 Paid-only problems are skipped unless the provider serving them is unlocked:
 any login does it for NeetCode and LintCode, while LeetCode needs Premium on
 the account behind the cookie. When one provider cannot serve a problem, the
-content chain falls through to the next (`<leader>nc` to reorder).
+provider chain falls through to the next (`<leader>nc` to reorder). Providers
+you are logged into are tried first, since the provider serving a problem also
+judges its submissions; logging in or out applies from the next problem opened.

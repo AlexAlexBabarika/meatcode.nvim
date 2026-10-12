@@ -18,7 +18,7 @@ end
 local function uncomment(src)
   return require("meatcode.runner.swift_structures").strip(src)
 end
-local function params(text, unrestricted, known)
+local function params(text, known)
   local out, start, depth = {}, 1, 0
   for i = 1, #text + 1 do
     local c = text:sub(i, i)
@@ -32,7 +32,7 @@ local function params(text, unrestricted, known)
         if not typ then return nil, "cannot parse Swift parameter `" .. part .. "`" end
         local inout = typ:match("^inout%s+") ~= nil
         typ = clean(typ:gsub("^inout%s+", ""):gsub("%s*=.*$", ""))
-        if not unrestricted and not supported(typ, known) then return nil, "unsupported Swift parameter type `" .. typ .. "`" end
+        if not supported(typ, known) then return nil, "unsupported Swift parameter type `" .. typ .. "`" end
         out[#out + 1] = { external=external == "_" and "" or external, name=name, type=typ, inout=inout }
       end
       start = i + 1
@@ -40,13 +40,13 @@ local function params(text, unrestricted, known)
   end
   return out
 end
-local function methods(src, unrestricted, known)
+local function methods(src, known)
   local out = {}
   for name, arguments, suffix in src:gmatch("func%s+([%w_]+)%s*%((.-)%)([^{}]*){") do
-    local args, err = params(arguments, unrestricted, known)
+    local args, err = params(arguments, known)
     if not args then return nil, err end
     local ret = clean(suffix:match("%-%>%s*(.-)%s*$") or "Void")
-    if ret ~= "Void" and ret ~= "()" and not unrestricted and not supported(ret, known) then return nil, "unsupported Swift result type `" .. ret .. "`" end
+    if ret ~= "Void" and ret ~= "()" and not supported(ret, known) then return nil, "unsupported Swift result type `" .. ret .. "`" end
     if ret == "()" then ret = "Void" end
     out[#out + 1] = { name=name, params=args, ret=ret }
   end
@@ -97,7 +97,6 @@ local function scan_block_methods(stripped, block)
       i = i + 1
     elseif depth == 1 and stripped:find("^func%f[%W]", i) then
       local prefix = stripped:sub(last_boundary, i - 1)
-      local is_mutating = prefix:match("%f[%w]mutating%f[%W]") ~= nil
       local is_static = (prefix:match("%f[%w]static%f[%W]") ~= nil) or (prefix:match("%f[%w]class%f[%W]") ~= nil)
       local name_start = i + 4
       local name = stripped:match("^%s*([%w_]+)", name_start)
@@ -139,14 +138,12 @@ local function scan_block_methods(stripped, block)
 
               out[#out + 1] = {
                 name = name,
-                mutating = is_mutating,
                 static = is_static,
                 is_generic = has_generic,
                 is_async = is_async,
                 is_throwing = is_throwing,
                 raw_params = raw_params,
                 raw_suffix = raw_suffix,
-                kind = block.kind,
               }
               depth = 2
               i = brace_pos + 1
@@ -168,57 +165,7 @@ local function scan_block_methods(stripped, block)
   end
   return out
 end
-local function extract_solution_methods(code, unrestricted)
-  local stripped = uncomment(code or "")
-  local blocks = find_solution_blocks(stripped)
-  local all_methods = {}
-  for _, block in ipairs(blocks) do
-    local block_methods = scan_block_methods(stripped, block)
-    for _, m in ipairs(block_methods) do
-      m.kind = block.kind
-      local p_text = m.raw_params and m.raw_params:sub(2, -2) or ""
-      local parsed_params = params(p_text, unrestricted)
-      m.params = parsed_params
-      local ret = clean(m.raw_suffix:match("%-%>%s*(.-)%s*$") or "Void")
-      if ret == "()" then ret = "Void" end
-      m.ret = ret
-      all_methods[#all_methods + 1] = m
-    end
-  end
-  return all_methods, blocks
-end
-local function has_solution_method(code, name, expected_params)
-  local methods_list = extract_solution_methods(code, true)
-  for _, m in ipairs(methods_list) do
-    if m.name == name then
-      if not expected_params then
-        return true
-      end
-      if m.params and #m.params == #expected_params then
-        local match = true
-        for i = 1, #expected_params do
-          local ep = expected_params[i]
-          local mp = m.params[i]
-          if mp.external ~= ep.external then
-            match = false
-            break
-          end
-          if ep.type and mp.type ~= ep.type then
-            match = false
-            break
-          end
-          if ep.inout ~= nil and mp.inout ~= ep.inout then
-            match = false
-            break
-          end
-        end
-        if match then return true end
-      end
-    end
-  end
-  return false
-end
-local function parse_starter_signature(starter, unrestricted, known)
+local function parse_starter_signature(starter, known)
   if type(starter) ~= "string" or starter == "" then
     return nil, "no Swift starter code to derive a signature from"
   end
@@ -245,25 +192,16 @@ local function parse_starter_signature(starter, unrestricted, known)
     return nil, "unsupported static Swift method signature"
   end
   local p_text = m.raw_params and m.raw_params:sub(2, -2) or ""
-  local parsed_params, err = params(p_text, unrestricted, known)
+  local parsed_params, err = params(p_text, known)
   if not parsed_params then return nil, err end
 
   local ret = clean(m.raw_suffix:match("%-%>%s*(.-)%s*$") or "Void")
   if ret == "()" then ret = "Void" end
-  if not unrestricted and ret ~= "Void" and not supported(ret, known) then
+  if ret ~= "Void" and not supported(ret, known) then
     return nil, "unsupported Swift result type `" .. ret .. "`"
   end
 
-  return {
-    name = m.name,
-    params = parsed_params,
-    ret = ret,
-    kind = blocks[1].kind,
-    mutating = m.mutating,
-    static = m.static,
-    raw_params = m.raw_params,
-    raw_suffix = m.raw_suffix,
-  }
+  return { name = m.name, params = parsed_params, ret = ret, kind = blocks[1].kind }
 end
 function M.parse_signature(starter, code, ref)
   local structures = require("meatcode.runner.swift_structures")
@@ -272,115 +210,7 @@ function M.parse_signature(starter, code, ref)
   for name in pairs(structures.types(ref or "")) do known[name] = true end
   local documented = structures.documented_helpers(starter or "", code or "")
   for name in pairs(structures.types(documented)) do known[name] = true end
-  return parse_starter_signature(starter, false, known)
-end
---- Bridge compatible provider entry points in the payload, never the buffer.
---- Appends an extension Solution that forwards calls to the original implementation.
-function M.adapt_submission(code, starter, judge_starter)
-  if type(code) ~= "string" then return nil, "no Swift solution code provided" end
-  local target, err = parse_starter_signature(judge_starter, true)
-  if not target then
-    return nil, "could not read the judge's Swift signature: " .. tostring(err)
-  end
-
-  if has_solution_method(code, target.name, target.params) then
-    return code
-  end
-
-  local source; source, err = parse_starter_signature(starter, true)
-  if not source then
-    return nil, "could not read the content provider's Swift signature: " .. tostring(err)
-  end
-
-  if source.name == target.name then
-    local labels_match = (#source.params == #target.params)
-    if labels_match then
-      for i = 1, #target.params do
-        if source.params[i].external ~= target.params[i].external then
-          labels_match = false
-          break
-        end
-      end
-    end
-    if labels_match then
-      return code
-    end
-  end
-  if #source.params ~= #target.params then
-    return nil, "Swift entry-point signatures differ in parameter count; use the judge's starter"
-  end
-
-  if source.ret ~= target.ret then
-    return nil, "Swift entry-point return types differ; use the judge's starter"
-  end
-
-  for i, sp in ipairs(source.params) do
-    local tp = target.params[i]
-    if sp.type ~= tp.type or sp.inout ~= tp.inout then
-      return nil, "Swift entry-point parameter " .. i .. " differs between providers; use the judge's starter"
-    end
-  end
-
-  local solution_kind = "class"
-  local stripped_code = uncomment(code)
-  local code_blocks = find_solution_blocks(stripped_code)
-  local found_decl = false
-  for _, b in ipairs(code_blocks) do
-    if b.kind == "struct" then
-      solution_kind = "struct"
-      found_decl = true
-      break
-    elseif b.kind == "class" then
-      solution_kind = "class"
-      found_decl = true
-      break
-    end
-  end
-  if not found_decl then
-    if target.kind == "struct" or (source and source.kind == "struct") then
-      solution_kind = "struct"
-    end
-  end
-
-  if solution_kind == "struct" and source.mutating and not target.mutating then
-    return nil, "Swift entry-point mutability differs; use the judge's starter"
-  end
-  local implements_source = has_solution_method(code, source.name, source.params)
-  if not implements_source then
-    return nil, "Swift solution must implement `" .. source.name .. "` or `" .. target.name .. "`"
-  end
-  local call_args = {}
-  for i, sp in ipairs(source.params) do
-    local tp = target.params[i]
-    local val = (sp.inout and "&" or "") .. tp.name
-    if sp.external ~= "" then
-      call_args[i] = sp.external .. ": " .. val
-    else
-      call_args[i] = val
-    end
-  end
-
-  local call_expr = "self." .. source.name .. "(" .. table.concat(call_args, ", ") .. ")"
-  local body_stmt
-  if target.ret == "Void" then
-    body_stmt = "        " .. call_expr
-  else
-    body_stmt = "        return " .. call_expr
-  end
-
-  local mut_prefix = ""
-  if solution_kind == "struct" and (target.mutating or source.mutating) then
-    mut_prefix = "mutating "
-  end
-
-  local raw_params = target.raw_params or "()"
-  local raw_suffix = (target.raw_suffix and target.raw_suffix ~= "") and (" " .. target.raw_suffix) or ""
-
-  local extension = "\n\nextension Solution {\n    "
-    .. mut_prefix .. "func " .. target.name .. raw_params .. raw_suffix
-    .. " {\n" .. body_stmt .. "\n    }\n}\n"
-
-  return code .. extension
+  return parse_starter_signature(starter, known)
 end
 function M.parse_class(starter, code, ref, target)
   local src = uncomment(starter or "")
@@ -403,9 +233,9 @@ function M.parse_class(starter, code, ref, target)
   end
   if depth ~= 0 then return nil, "unterminated Swift class declaration for " .. name end
   local block = src:sub(start, close - 1)
-  local ctor, err = params(block:match("init%s*%((.-)%)") or "", false, known)
+  local ctor, err = params(block:match("init%s*%((.-)%)") or "", known)
   if not ctor then return nil, err end
-  local parsed; parsed, err = methods(block, false, known)
+  local parsed; parsed, err = methods(block, known)
   if not parsed then return nil, err end
   return { name=name, kind=block:match("class%s+" .. name) and "class" or "struct", ctor=ctor, methods=parsed }
 end
